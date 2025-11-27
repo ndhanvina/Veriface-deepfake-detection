@@ -7,3 +7,10 @@ numpy
 tqdm
 scikit-learn
 matplotlib
+
+# Runtime dependencies required by the Streamlit app
+imagehash
+PyWavelets
+pillow
+scipy
+streamlit
