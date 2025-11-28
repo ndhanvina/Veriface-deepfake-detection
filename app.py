@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image, ExifTags
 from src.model import build_model
+from src.utils import load_config, safe_load_json, safe_save_json
 import json
 import os
 import imagehash
@@ -15,34 +16,20 @@ from io import BytesIO
 # ----------------------------
 # CONFIGURATION
 # ----------------------------
-CHECKPOINT_PATH = "outputs/best.ckpt"
+CONFIG = load_config()
+CHECKPOINT_PATH = CONFIG["paths"]["checkpoint"]
+FEEDBACK_FILE = CONFIG["paths"]["feedback"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CLASSES = ["real", "fake"]
-FEEDBACK_FILE = "feedback_memory.json"
-
 
 # ----------------------------
 # Feedback file load/save (ALWAYS reload)
 # ----------------------------
-def load_feedback_file():
-    if not os.path.exists(FEEDBACK_FILE):
-        with open(FEEDBACK_FILE, "w") as f:
-            json.dump({}, f)
-    try:
-        with open(FEEDBACK_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-
-def save_feedback_file(mem):
-    with open(FEEDBACK_FILE, "w") as f:
-        json.dump(mem, f, indent=4)
-
+# Using safe_load_json and safe_save_json from utils for concurrency safety
 
 # --- IMPORTANT ---
 # Reload feedback memory on each rerun
-feedback_memory = load_feedback_file()
+feedback_memory = safe_load_json(FEEDBACK_FILE)
 
 
 # ----------------------------
@@ -108,18 +95,24 @@ def noise_level(image):
 # ----------------------------
 @st.cache_resource
 def load_model():
-    model = build_model(backbone="resnet18", num_classes=2)
-    ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    model = build_model(backbone=CONFIG["model"]["backbone"], num_classes=CONFIG["model"]["num_classes"])
+    
+    if os.path.exists(CHECKPOINT_PATH):
+        # SECURITY FIX: weights_only=True
+        ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
 
-    if "model" in ckpt:
-        state = ckpt["model"]
-    elif "state_dict" in ckpt:
-        state = ckpt["state_dict"]
+        if "model" in ckpt:
+            state = ckpt["model"]
+        elif "state_dict" in ckpt:
+            state = ckpt["state_dict"]
+        else:
+            state = ckpt
+
+        clean_state = {k.replace("model.", "").replace("module.", ""): v for k, v in state.items()}
+        model.load_state_dict(clean_state, strict=False)
     else:
-        state = ckpt
-
-    clean_state = {k.replace("model.", "").replace("module.", ""): v for k, v in state.items()}
-    model.load_state_dict(clean_state, strict=False)
+        st.warning(f"Checkpoint not found at {CHECKPOINT_PATH}. Using random weights.")
+        
     model.to(DEVICE)
     model.eval()
     return model
@@ -130,7 +123,7 @@ def load_model():
 # ----------------------------
 def preprocess_image(image):
     trans = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((CONFIG["data"]["img_size"], CONFIG["data"]["img_size"])),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406],
                              [0.229, 0.224, 0.225])
@@ -161,12 +154,15 @@ def predict_image(model, image):
     sharp = sharpness_score(image)
     noise = noise_level(image)
 
-    fake_score = (freq > 0.012) + (sharp < 120) + (noise < 3.0)
+    heuristics = CONFIG["heuristics"]
+    fake_score = (freq > heuristics["frequency_threshold"]) + \
+                 (sharp < heuristics["sharpness_threshold"]) + \
+                 (noise < heuristics["noise_threshold"])
 
-    if fake_score >= 2:
+    if fake_score >= heuristics["fake_score_threshold"]:
         return "fake", max(conf, 0.9), img_hash
 
-    if pred == "real" and conf < 0.6:
+    if pred == "real" and conf < heuristics["confidence_threshold_real"]:
         return "fake", 0.75, img_hash
 
     return pred, conf, img_hash
@@ -177,7 +173,7 @@ def predict_image(model, image):
 # ----------------------------
 def save_feedback(img_hash, correct_label):
     feedback_memory[img_hash] = {"label": correct_label}
-    save_feedback_file(feedback_memory)
+    safe_save_json(FEEDBACK_FILE, feedback_memory)
 
 
 # ----------------------------

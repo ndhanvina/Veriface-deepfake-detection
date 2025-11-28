@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from src.model import build_model
+from src.utils import load_config, safe_load_json, safe_save_json
 import warnings
 import time
 
@@ -15,7 +16,8 @@ warnings.filterwarnings("ignore")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ---------- Files & config ----------
-FEEDBACK_FILE = "feedback_memory.json"
+CONFIG = load_config()
+FEEDBACK_FILE = CONFIG["paths"]["feedback"]
 MEMORY_MAX = 500             # max stored corrected examples
 EMB_SIM_THRESHOLD = 0.75     # cosine similarity threshold for prototype match
 PROTOTYPE_MOMENTUM = 0.85    # momentum when updating prototypes
@@ -49,7 +51,7 @@ def get_embedding(img: Image.Image):
 
 # ---------- Main model transform ----------
 main_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((CONFIG["data"]["img_size"], CONFIG["data"]["img_size"])),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225]),
@@ -75,26 +77,23 @@ def generate_crops(img, crop=224):
 
 # ---------- Load/save feedback memory ----------
 def load_feedback():
-    if os.path.exists(FEEDBACK_FILE):
-        with open(FEEDBACK_FILE, "r") as f:
-            stored = json.load(f)
-        # convert lists back to numpy for runtime
-        memory = {
-            "entries": [
-                {
-                    "embedding": np.array(e["embedding"], dtype=np.float32),
-                    "label": e["label"],
-                    "time": e.get("time", 0),
-                    "id": e.get("id", None)
-                }
-                for e in stored.get("entries", [])
-            ],
-            "prototypes": {k: np.array(v, dtype=np.float32) for k, v in stored.get("prototypes", {}).items()},
-            "classifier": stored.get("classifier", None)  # will be dict of weights/bias
-        }
-        return memory
-    # default empty structure
-    return {"entries": [], "prototypes": {}, "classifier": None}
+    stored = safe_load_json(FEEDBACK_FILE, default={"entries": [], "prototypes": {}, "classifier": None})
+    
+    # convert lists back to numpy for runtime
+    memory = {
+        "entries": [
+            {
+                "embedding": np.array(e["embedding"], dtype=np.float32),
+                "label": e["label"],
+                "time": e.get("time", 0),
+                "id": e.get("id", None)
+            }
+            for e in stored.get("entries", [])
+        ],
+        "prototypes": {k: np.array(v, dtype=np.float32) for k, v in stored.get("prototypes", {}).items()},
+        "classifier": stored.get("classifier", None)  # will be dict of weights/bias
+    }
+    return memory
 
 
 def save_feedback(memory):
@@ -107,8 +106,7 @@ def save_feedback(memory):
         "prototypes": {k: v.tolist() for k, v in memory.get("prototypes", {}).items()},
         "classifier": memory.get("classifier", None)
     }
-    with open(FEEDBACK_FILE, "w") as f:
-        json.dump(stored, f, indent=2)
+    safe_save_json(FEEDBACK_FILE, stored)
 
 
 # ---------- Online linear classifier in embedding space ----------
@@ -236,20 +234,26 @@ def apply_feedback_policy(probs, embedding, memory, classifier):
 
 # ---------- Load trained model checkpoint (your original loader) ----------
 def load_model(checkpoint_path):
-    model = build_model(backbone="resnet18", num_classes=2)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if isinstance(checkpoint, dict):
-        if "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        elif "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
+    model = build_model(backbone=CONFIG["model"]["backbone"], num_classes=CONFIG["model"]["num_classes"])
+    
+    if os.path.exists(checkpoint_path):
+        # SECURITY FIX: weights_only=True
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        if isinstance(checkpoint, dict):
+            if "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
         else:
             state_dict = checkpoint
+        clean_state = {k.replace("model.", "").replace("net.", ""): v
+                       for k, v in state_dict.items()}
+        model.load_state_dict(clean_state, strict=False)
     else:
-        state_dict = checkpoint
-    clean_state = {k.replace("model.", "").replace("net.", ""): v
-                   for k, v in state_dict.items()}
-    model.load_state_dict(clean_state, strict=False)
+        print(f"Warning: Checkpoint not found at {checkpoint_path}. Using random weights.")
+        
     model.to(device)
     model.eval()
     return model
@@ -330,7 +334,7 @@ def predict_image(model, image_path, memory, classifier):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
-    parser.add_argument("--checkpoint", default="outputs/best.ckpt")
+    parser.add_argument("--checkpoint", default=CONFIG["paths"]["checkpoint"])
     args = parser.parse_args()
 
     # load models+memory

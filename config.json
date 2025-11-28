@@ -22,5 +22,16 @@
   "output": {
     "dir": "outputs",
     "save_best_by": "val_auc"
+  },
+  "paths": {
+    "checkpoint": "outputs/best.ckpt",
+    "feedback": "feedback_memory.json"
+  },
+  "heuristics": {
+    "fake_score_threshold": 2,
+    "confidence_threshold_real": 0.6,
+    "frequency_threshold": 0.012,
+    "sharpness_threshold": 120,
+    "noise_threshold": 3.0
   }
 }

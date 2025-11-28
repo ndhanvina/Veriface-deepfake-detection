@@ -22,3 +22,7 @@ pillow
 
 # Optional but recommended for safety
 requests
+
+# Concurrency & Testing
+filelock
+pytest
